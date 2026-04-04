@@ -15,6 +15,7 @@ from rich.console import Console
 import db_connector
 from profiler import load_file, profile_dataframe, print_profile
 from interpreter import interpret_profile, format_findings
+from cleaner import clean_dataframe
 
 
 class DataProfilerApp(tk.Frame):
@@ -30,7 +31,8 @@ class DataProfilerApp(tk.Frame):
         self._queue = queue.Queue()
         self._poll_id = None
         self._start_time = 0.0
-        self._polling_for = "analysis"  # "connect" or "analysis"
+        self._polling_for = "analysis"  # "connect", "analysis", or "cleaning"
+        self._df = None  # loaded DataFrame, retained for clean export
 
         # SQL panel StringVars
         self._source_var   = tk.StringVar(value="file")
@@ -87,6 +89,16 @@ class DataProfilerApp(tk.Frame):
         self._btn_csv = tk.Button(btn_row, text="Export CSV", command=self._export_csv,
                                   state=tk.DISABLED, width=12)
         self._btn_csv.pack(side=tk.LEFT)
+
+        self._btn_clean_csv = tk.Button(btn_row, text="Export Clean CSV",
+                                        command=self._export_clean_csv,
+                                        state=tk.DISABLED, width=16)
+        self._btn_clean_csv.pack(side=tk.LEFT, padx=(8, 0))
+
+        self._btn_clean_parquet = tk.Button(btn_row, text="Export Clean Parquet",
+                                            command=self._export_clean_parquet,
+                                            state=tk.DISABLED, width=18)
+        self._btn_clean_parquet.pack(side=tk.LEFT, padx=(4, 0))
 
         # Progress frame (hidden until analysis/connect starts)
         self._progress_frame = tk.Frame(self)
@@ -268,6 +280,8 @@ class DataProfilerApp(tk.Frame):
         self._set_controls_enabled(False)
         self._btn_json.config(state=tk.DISABLED)
         self._btn_csv.config(state=tk.DISABLED)
+        self._btn_clean_csv.config(state=tk.DISABLED)
+        self._btn_clean_parquet.config(state=tk.DISABLED)
 
         self._polling_for = "analysis"
         self._start_time = time.perf_counter()
@@ -324,7 +338,7 @@ class DataProfilerApp(tk.Frame):
                 "Interpretation":   t3 - t2,
                 "Rendering":        t4 - t3,
             }
-            self._queue.put(("done", profile, findings, findings_text, buf.getvalue(),
+            self._queue.put(("done", df, profile, findings, findings_text, buf.getvalue(),
                              timings, source_label))
         except Exception as exc:
             self._queue.put(("error", str(exc)))
@@ -344,10 +358,19 @@ class DataProfilerApp(tk.Frame):
                     self._status_label.config(text=status)
 
                 elif msg[0] == "done":
-                    _, profile, findings, findings_text, rich_output, timings, source_label = msg
+                    _, df, profile, findings, findings_text, rich_output, timings, source_label = msg
                     elapsed = time.perf_counter() - self._start_time
-                    self._on_analysis_complete(profile, findings, findings_text,
+                    self._on_analysis_complete(df, profile, findings, findings_text,
                                                rich_output, elapsed, timings, source_label)
+                    return
+
+                elif msg[0] == "clean_done":
+                    _, cleaned_df, cleaning_log, fmt = msg
+                    self._on_clean_complete(cleaned_df, cleaning_log, fmt)
+                    return
+
+                elif msg[0] == "clean_error":
+                    self._on_clean_error(msg[1])
                     return
 
                 elif msg[0] == "error":
@@ -366,7 +389,7 @@ class DataProfilerApp(tk.Frame):
         except queue.Empty:
             pass
 
-        if self._polling_for == "analysis":
+        if self._polling_for in ("analysis", "cleaning"):
             self._timer_label.config(text=f"{time.perf_counter() - self._start_time:.1f}s")
 
         self._poll_id = self.after(100, self._poll_queue)
@@ -401,8 +424,9 @@ class DataProfilerApp(tk.Frame):
     # Analysis completion handlers
     # ------------------------------------------------------------------
 
-    def _on_analysis_complete(self, profile, findings, findings_text,
+    def _on_analysis_complete(self, df, profile, findings, findings_text,
                                rich_output, elapsed, timings, source_label) -> None:
+        self._df = df
         self._profile = profile
         self._findings = findings
         self._source_label = source_label
@@ -420,8 +444,11 @@ class DataProfilerApp(tk.Frame):
         self._set_controls_enabled(True)
         self._btn_json.config(state=tk.NORMAL)
         self._btn_csv.config(state=tk.NORMAL)
+        self._btn_clean_csv.config(state=tk.NORMAL)
+        self._btn_clean_parquet.config(state=tk.NORMAL)
 
     def _on_analysis_error(self, message: str) -> None:
+        self._df = None
         self._profile = None
         self._findings = None
 
@@ -432,6 +459,8 @@ class DataProfilerApp(tk.Frame):
 
         self._progress_frame.pack_forget()
         self._set_controls_enabled(True)
+        self._btn_clean_csv.config(state=tk.DISABLED)
+        self._btn_clean_parquet.config(state=tk.DISABLED)
 
     # ------------------------------------------------------------------
     # Export helpers
@@ -525,6 +554,100 @@ class DataProfilerApp(tk.Frame):
             messagebox.showinfo("Export complete", f"CSV saved to:\n{path}")
         except Exception as exc:
             messagebox.showerror("Export failed", str(exc))
+
+    # ------------------------------------------------------------------
+    # Clean export
+    # ------------------------------------------------------------------
+
+    def _export_clean_csv(self) -> None:
+        self._start_clean("csv")
+
+    def _export_clean_parquet(self) -> None:
+        self._start_clean("parquet")
+
+    def _start_clean(self, fmt: str) -> None:
+        self._progress_bar["value"] = 0
+        self._status_label.config(text="Cleaning data...")
+        self._timer_label.config(text="0.0s")
+        self._progress_frame.pack(fill=tk.X, pady=(0, 6), before=self._results.master)
+        self._set_controls_enabled(False)
+        self._btn_json.config(state=tk.DISABLED)
+        self._btn_csv.config(state=tk.DISABLED)
+        self._btn_clean_csv.config(state=tk.DISABLED)
+        self._btn_clean_parquet.config(state=tk.DISABLED)
+
+        self._polling_for = "cleaning"
+        self._start_time = time.perf_counter()
+        threading.Thread(target=self._clean_worker, args=(fmt,), daemon=True).start()
+        self._poll_id = self.after(100, self._poll_queue)
+
+    def _clean_worker(self, fmt: str) -> None:
+        try:
+            self._queue.put(("progress", 10, "Cleaning data..."))
+            cleaned_df, cleaning_log = clean_dataframe(self._df)
+            self._queue.put(("progress", 100, "Done."))
+            self._queue.put(("clean_done", cleaned_df, cleaning_log, fmt))
+        except Exception as exc:
+            self._queue.put(("clean_error", str(exc)))
+
+    def _on_clean_complete(self, cleaned_df, cleaning_log: list, fmt: str) -> None:
+        self._progress_frame.pack_forget()
+        self._set_controls_enabled(True)
+        self._btn_json.config(state=tk.NORMAL)
+        self._btn_csv.config(state=tk.NORMAL)
+        self._btn_clean_csv.config(state=tk.NORMAL)
+        self._btn_clean_parquet.config(state=tk.NORMAL)
+
+        max_shown = 15
+        if len(cleaning_log) > max_shown:
+            shown = cleaning_log[:max_shown]
+            shown.append(f"... and {len(cleaning_log) - max_shown} more")
+        else:
+            shown = cleaning_log
+        summary = "\n".join(f"  \u2022 {entry}" for entry in shown)
+        messagebox.showinfo(
+            "Cleaning Summary",
+            f"Cleaning complete. {len(cleaning_log)} action(s):\n\n{summary}",
+        )
+
+        stem = self._export_stem()
+        if fmt == "csv":
+            path = filedialog.asksaveasfilename(
+                title="Save cleaned data as CSV",
+                defaultextension=".csv",
+                filetypes=[("CSV files", "*.csv")],
+                initialfile=f"{stem}_clean.csv",
+            )
+            if not path:
+                return
+            try:
+                cleaned_df.to_csv(path, index=False)
+                messagebox.showinfo("Export complete", f"Clean CSV saved to:\n{path}")
+            except Exception as exc:
+                messagebox.showerror("Export failed", str(exc))
+        else:
+            path = filedialog.asksaveasfilename(
+                title="Save cleaned data as Parquet",
+                defaultextension=".parquet",
+                filetypes=[("Parquet files", "*.parquet")],
+                initialfile=f"{stem}_clean.parquet",
+            )
+            if not path:
+                return
+            try:
+                cleaned_df.to_parquet(path, index=False)
+                messagebox.showinfo("Export complete", f"Clean Parquet saved to:\n{path}")
+            except Exception as exc:
+                messagebox.showerror("Export failed", str(exc))
+
+    def _on_clean_error(self, message: str) -> None:
+        self._progress_frame.pack_forget()
+        self._set_controls_enabled(True)
+        self._btn_json.config(state=tk.NORMAL)
+        self._btn_csv.config(state=tk.NORMAL)
+        self._btn_clean_csv.config(state=tk.NORMAL)
+        self._btn_clean_parquet.config(state=tk.NORMAL)
+        messagebox.showerror("Cleaning failed", message)
 
 
 def launch() -> None:
