@@ -189,11 +189,12 @@ def _col_table(col: str, stats: dict) -> Table:
     return table
 
 
-def print_profile(profile: dict) -> None:
+def print_profile(profile: dict, console: Console | None = None) -> None:
     # force_terminal=True: treat stream as a terminal even when not a real TTY
     # color_system="truecolor": force ANSI colour output (auto-detection returns None
     # for non-TTY streams, suppressing all colour even with force_terminal=True)
-    console = Console(force_terminal=True, color_system="truecolor")
+    if console is None:
+        console = Console(force_terminal=True, color_system="truecolor")
     s = profile["summary"]
 
     # Choose colors for the two summary metrics that signal data quality issues
