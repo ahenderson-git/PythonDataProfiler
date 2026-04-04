@@ -85,7 +85,7 @@ def profile_column(series: pd.Series, total_rows: int) -> dict:
     return profile
 
 
-def profile_dataframe(df: pd.DataFrame) -> dict:
+def profile_dataframe(df: pd.DataFrame, progress_callback=None) -> dict:
     total_rows = len(df)
     total_cells = total_rows * len(df.columns)  # used to compute overall null percentage
 
@@ -105,8 +105,13 @@ def profile_dataframe(df: pd.DataFrame) -> dict:
         "memory_mb": round(df.memory_usage(deep=True).sum() / 1024 ** 2, 3),
     }
 
-    # Profile each column independently and store results keyed by column name
-    columns = {col: profile_column(df[col], total_rows) for col in df.columns}
+    # Profile each column independently; fire optional callback after each for progress reporting
+    n_cols = len(df.columns)
+    columns = {}
+    for i, col in enumerate(df.columns):
+        columns[col] = profile_column(df[col], total_rows)
+        if progress_callback:
+            progress_callback(i + 1, n_cols)
 
     return {"summary": summary, "columns": columns}
 

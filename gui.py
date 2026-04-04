@@ -3,10 +3,12 @@ import io
 import json
 import os
 import pathlib
+import queue
+import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 from rich.console import Console
 
@@ -21,6 +23,9 @@ class DataProfilerApp(tk.Frame):
         self._profile = None
         self._findings = None
         self._source_path = ""
+        self._queue = queue.Queue()
+        self._poll_id = None
+        self._start_time = 0.0
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -33,21 +38,36 @@ class DataProfilerApp(tk.Frame):
         tk.Label(file_row, text="File:").pack(side=tk.LEFT)
 
         self._file_var = tk.StringVar()
-        tk.Entry(file_row, textvariable=self._file_var, state="readonly", width=60).pack(side=tk.LEFT, padx=(6, 6))
+        self._entry = tk.Entry(file_row, textvariable=self._file_var, state="readonly", width=60)
+        self._entry.pack(side=tk.LEFT, padx=(6, 6))
 
-        tk.Button(file_row, text="Browse", command=self._browse).pack(side=tk.LEFT)
+        self._btn_browse = tk.Button(file_row, text="Browse", command=self._browse)
+        self._btn_browse.pack(side=tk.LEFT)
 
         # Action buttons row
         btn_row = tk.Frame(self)
         btn_row.pack(anchor="w", pady=(0, 8))
 
-        tk.Button(btn_row, text="Analyse", command=self._analyse, width=12).pack(side=tk.LEFT, padx=(0, 8))
+        self._btn_analyse = tk.Button(btn_row, text="Analyse", command=self._analyse, width=12)
+        self._btn_analyse.pack(side=tk.LEFT, padx=(0, 8))
 
         self._btn_json = tk.Button(btn_row, text="Export JSON", command=self._export_json, state=tk.DISABLED, width=12)
         self._btn_json.pack(side=tk.LEFT, padx=(0, 4))
 
         self._btn_csv = tk.Button(btn_row, text="Export CSV", command=self._export_csv, state=tk.DISABLED, width=12)
         self._btn_csv.pack(side=tk.LEFT)
+
+        # Progress frame (hidden until analysis starts)
+        self._progress_frame = tk.Frame(self)
+
+        self._progress_bar = ttk.Progressbar(self._progress_frame, mode="determinate", maximum=100, length=400)
+        self._progress_bar.pack(side=tk.LEFT, padx=(0, 8))
+
+        self._status_label = tk.Label(self._progress_frame, text="", anchor="w")
+        self._status_label.pack(side=tk.LEFT, expand=True, fill=tk.X)
+
+        self._timer_label = tk.Label(self._progress_frame, text="", width=8, anchor="e")
+        self._timer_label.pack(side=tk.RIGHT)
 
         # Results area
         text_frame = tk.Frame(self)
@@ -80,41 +100,124 @@ class DataProfilerApp(tk.Frame):
         if path:
             self._file_var.set(path)
 
+    def _set_controls_enabled(self, enabled: bool) -> None:
+        state = tk.NORMAL if enabled else tk.DISABLED
+        self._btn_browse.config(state=state)
+        self._btn_analyse.config(state=state)
+
     def _analyse(self) -> None:
         path = self._file_var.get()
         if not path:
             messagebox.showwarning("No file selected", "Please select a file before clicking Analyse.")
             return
 
+        # Measure char width on the main thread (tkfont is not thread-safe)
+        font = tkfont.Font(font=self._results.cget("font"))
+        char_width = max(40, self._results.winfo_width() // font.measure("0"))
+
+        # Show progress UI and disable controls
+        self._progress_bar["value"] = 0
+        self._status_label.config(text="Loading file...")
+        self._timer_label.config(text="0.0s")
+        self._progress_frame.pack(fill=tk.X, pady=(0, 6), before=self._results.master)
+        self._set_controls_enabled(False)
+        self._btn_json.config(state=tk.DISABLED)
+        self._btn_csv.config(state=tk.DISABLED)
+
+        self._start_time = time.perf_counter()
+        threading.Thread(target=self._worker, args=(path, char_width), daemon=True).start()
+        self._poll_id = self.after(100, self._poll_queue)
+
+    def _worker(self, path: str, char_width: int) -> None:
+        """Runs in background thread. Must not touch Tkinter widgets directly."""
         try:
-            start = time.perf_counter()
+            t0 = time.perf_counter()
             df = load_file(path)
-            profile = profile_dataframe(df)
+            t1 = time.perf_counter()
+            self._queue.put(("progress", 5, "Loading file..."))
+
+            def col_cb(n, total):
+                pct = 5 + (n / total * 75)
+                self._queue.put(("progress", pct, f"Profiling column {n}/{total}..."))
+
+            profile = profile_dataframe(df, progress_callback=col_cb)
+            t2 = time.perf_counter()
+            self._queue.put(("progress", 82, "Interpreting findings..."))
+
             findings = interpret_profile(profile, df)
+            t3 = time.perf_counter()
+            self._queue.put(("progress", 95, "Rendering..."))
+
             findings_text = format_findings(findings, file_name=os.path.basename(path))
-            font = tkfont.Font(font=self._results.cget("font"))
-            char_width = max(40, self._results.winfo_width() // font.measure("0"))
             buf = io.StringIO()
             console = Console(file=buf, highlight=False, width=char_width)
             print_profile(profile, console=console)
-            elapsed = time.perf_counter() - start
-            output = f"Analysed in {elapsed:.2f}s\n\n" + findings_text + buf.getvalue()
-            self._profile = profile
-            self._findings = findings
-            self._source_path = path
-            self._btn_json.config(state=tk.NORMAL)
-            self._btn_csv.config(state=tk.NORMAL)
+            t4 = time.perf_counter()
+
+            timings = {
+                "File loading":     t1 - t0,
+                "Column profiling": t2 - t1,
+                "Interpretation":   t3 - t2,
+                "Rendering":        t4 - t3,
+            }
+            self._queue.put(("done", profile, findings, findings_text, buf.getvalue(), timings))
         except Exception as exc:
-            output = f"Error: {exc}"
-            self._profile = None
-            self._findings = None
-            self._btn_json.config(state=tk.DISABLED)
-            self._btn_csv.config(state=tk.DISABLED)
+            self._queue.put(("error", str(exc)))
+
+    def _poll_queue(self) -> None:
+        """Runs on the main thread every 100ms to drain the worker queue."""
+        try:
+            while True:
+                msg = self._queue.get_nowait()
+                if msg[0] == "progress":
+                    _, pct, status = msg
+                    self._progress_bar["value"] = pct
+                    self._status_label.config(text=status)
+                elif msg[0] == "done":
+                    _, profile, findings, findings_text, rich_output, timings = msg
+                    elapsed = time.perf_counter() - self._start_time
+                    self._on_analysis_complete(profile, findings, findings_text, rich_output, elapsed, timings)
+                    return
+                elif msg[0] == "error":
+                    self._on_analysis_error(msg[1])
+                    return
+        except queue.Empty:
+            pass
+
+        # Update live timer
+        self._timer_label.config(text=f"{time.perf_counter() - self._start_time:.1f}s")
+        self._poll_id = self.after(100, self._poll_queue)
+
+    def _on_analysis_complete(self, profile, findings, findings_text, rich_output, elapsed, timings) -> None:
+        self._profile = profile
+        self._findings = findings
+        self._source_path = self._file_var.get()
+
+        timing_lines = "\n".join(f"  {label:<20}{secs:.2f}s" for label, secs in timings.items())
+        header = f"Analysed in {elapsed:.2f}s\n{timing_lines}\n"
+        output = header + "\n" + findings_text + rich_output
 
         self._results.config(state=tk.NORMAL)
         self._results.delete("1.0", tk.END)
         self._results.insert(tk.END, output)
         self._results.config(state=tk.DISABLED)
+
+        self._progress_frame.pack_forget()
+        self._set_controls_enabled(True)
+        self._btn_json.config(state=tk.NORMAL)
+        self._btn_csv.config(state=tk.NORMAL)
+
+    def _on_analysis_error(self, message: str) -> None:
+        self._profile = None
+        self._findings = None
+
+        self._results.config(state=tk.NORMAL)
+        self._results.delete("1.0", tk.END)
+        self._results.insert(tk.END, f"Error: {message}")
+        self._results.config(state=tk.DISABLED)
+
+        self._progress_frame.pack_forget()
+        self._set_controls_enabled(True)
 
     def _export_json(self) -> None:
         stem = pathlib.Path(self._source_path).stem
