@@ -29,11 +29,12 @@ A lightweight desktop GUI application for quickly profiling CSV and Parquet data
 
 ```
 PythonDataProfiler/
-├── main.py           # Entry point — run this file to launch the GUI
-├── gui.py            # Tkinter GUI: file selector, results display, export
-├── profiler.py       # Core logic: load, profile, and render statistics
-├── interpreter.py    # Rule-based findings and recommendations engine
-├── sample_data.csv   # Sample dataset for testing
+├── main.py            # Entry point — run this file to launch the GUI
+├── gui.py             # Tkinter GUI: file selector, SQL panel, results display, export
+├── profiler.py        # Core logic: load, profile, and render statistics
+├── interpreter.py     # Rule-based findings and recommendations engine
+├── db_connector.py    # Azure SQL Server connectivity via pyodbc
+├── sample_data.csv    # Sample dataset for testing
 └── README.md
 ```
 
@@ -56,7 +57,58 @@ pip install pandas pyarrow rich
 
 > `pyarrow` is only required for reading Parquet files. If you only use CSV, it can be omitted.
 
+> `pyodbc` is only required for SQL Server connectivity. See **Azure SQL Server Prerequisites** below.
+
 > Tkinter is included with the standard Python distribution on Windows, macOS, and most Linux systems. No separate install is needed.
+
+---
+
+## Azure SQL Server Prerequisites
+
+SQL Server connectivity requires two additional components installed separately from the main pip dependencies.
+
+### Step 1 — Python package
+
+```bash
+pip install pyodbc
+```
+
+### Step 2 — Microsoft ODBC Driver 18 for SQL Server
+
+This is a system-level driver that pyodbc uses to communicate with SQL Server. It is free and provided by Microsoft.
+
+**Windows**
+
+Download and run the `.msi` installer from:
+[https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server](https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server)
+
+To verify installation: open **ODBC Data Source Administrator** (`odbcad32.exe`) → **Drivers** tab → confirm "ODBC Driver 18 for SQL Server" is listed.
+
+**macOS (Homebrew)**
+
+```bash
+brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release
+brew install msodbcsql18
+```
+
+**Linux (Ubuntu/Debian)**
+
+```bash
+curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list \
+  | sudo tee /etc/apt/sources.list.d/mssql-release.list
+sudo apt-get update
+sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
+```
+
+### Authentication notes
+
+- **SQL auth** — enter your SQL Server username and password in the GUI connection panel
+- **AAD Interactive** — when you click Analyse, a browser window will open for Azure AD sign-in (supports MFA). Complete the sign-in and the data fetch will proceed automatically.
+
+### Firewall
+
+Your Azure SQL Server's firewall must allow connections from your IP address. Configure this in the Azure portal under the SQL Server resource → **Networking**.
 
 ---
 
@@ -68,13 +120,28 @@ Launch the application:
 python main.py
 ```
 
-A window will open with the following controls:
+A window will open. Select your data source using the **File** / **SQL Server** toggle at the top.
 
-1. **Browse** — opens a file dialog filtered to `.csv` and `.parquet` files; the selected path is shown in the entry field
-2. **Analyse** — loads the file, computes statistics, runs the findings engine, and displays results in the panel below; elapsed time is shown at the top
-3. **Export JSON** / **Export CSV** — save the results to a file (enabled only after a successful analysis)
+### Profiling a file
 
-The results panel is scrollable both vertically and horizontally, and re-renders at the current window width when Analyse is clicked.
+1. Select **File** (default)
+2. Click **Browse** — choose a `.csv` or `.parquet` file
+3. Click **Analyse**
+
+### Profiling an Azure SQL Server table or view
+
+1. Select **SQL Server**
+2. Fill in **Server** (short name only, e.g. `myserver` — `.database.windows.net` is added automatically), **Database**, and **Auth** type
+3. For SQL auth: enter **Username** and **Password**
+4. Click **Connect** — the table/view list populates on success
+5. Select a table or view from the dropdown, or type a custom SQL query in the **Custom SQL** box (custom SQL takes priority if both are provided)
+6. Click **Analyse**
+
+### After analysis
+
+- **Export JSON** / **Export CSV** — save the results (enabled only after a successful analysis)
+- Elapsed time and per-stage breakdown are shown at the top of the results panel
+- The results panel is scrollable both vertically and horizontally, and re-renders at the current window width when Analyse is clicked
 
 ---
 
