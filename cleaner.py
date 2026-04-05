@@ -1,14 +1,15 @@
 import datetime
 import re
+from functools import partial
 
 import pandas as pd
+
+from constants import DATETIME_PARSE_THRESHOLD
 
 _NULL_STRINGS: frozenset = frozenset({
     "NULL", "null", "None", "N/A", "na", "n/a",
     "#N/A", "nan", "NaN", "", " ", "-",
 })
-
-_DATETIME_THRESHOLD: float = 0.80
 
 _SPECIAL_CHAR_PATTERN = re.compile(r"[^\w\s.,!?@#$%]")
 
@@ -108,11 +109,14 @@ def _standardise_nulls(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict], list
     return df, log, detail
 
 
-def _remove_special_characters(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict], list[dict]]:
+def _remove_special_characters(
+    df: pd.DataFrame,
+    pattern: re.Pattern = _SPECIAL_CHAR_PATTERN,
+) -> tuple[pd.DataFrame, list[dict], list[dict]]:
     log: list[dict] = []
     detail: list[dict] = []
     for col in df.select_dtypes(include="object").columns:
-        cleaned = df[col].str.replace(_SPECIAL_CHAR_PATTERN, "", regex=True)
+        cleaned = df[col].str.replace(pattern, "", regex=True)
         changed_mask = (cleaned != df[col]).fillna(False)
         changed = changed_mask.sum()
         if changed > 0:
@@ -143,7 +147,25 @@ def _remove_special_characters(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dic
     return df, log, detail
 
 
-def _parse_datetimes(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict], list[dict]]:
+def _has_ambiguous_dates(series: pd.Series) -> bool:
+    """Return True if any value parses differently with dayfirst=True vs dayfirst=False.
+
+    An "ambiguous" value is one where both DD/MM and MM/DD interpretations are valid
+    (e.g. '01/05/2023' could be January 5th or May 1st).
+    """
+    try:
+        month_first = pd.to_datetime(series, format="mixed", dayfirst=False, errors="coerce")
+        day_first   = pd.to_datetime(series, format="mixed", dayfirst=True,  errors="coerce")
+        both_valid  = month_first.notna() & day_first.notna()
+        return bool((month_first[both_valid] != day_first[both_valid]).any())
+    except Exception:
+        return False
+
+
+def _parse_datetimes(
+    df: pd.DataFrame,
+    dayfirst: bool = False,
+) -> tuple[pd.DataFrame, list[dict], list[dict]]:
     log: list[dict] = []
     detail: list[dict] = []
     for col in df.select_dtypes(include="object").columns:
@@ -155,14 +177,14 @@ def _parse_datetimes(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict], list[d
         if not has_separator:
             continue
         try:
-            converted = pd.to_datetime(non_null, format="mixed", dayfirst=False, errors="coerce")
+            converted = pd.to_datetime(non_null, format="mixed", dayfirst=dayfirst, errors="coerce")
         except TypeError:
             converted = pd.to_datetime(non_null, errors="coerce")
         parse_ratio = converted.notna().sum() / len(non_null)
-        if parse_ratio >= _DATETIME_THRESHOLD:
+        if parse_ratio >= DATETIME_PARSE_THRESHOLD:
             before_series = df[col].copy()
             try:
-                df[col] = pd.to_datetime(df[col], format="mixed", dayfirst=False, errors="coerce")
+                df[col] = pd.to_datetime(df[col], format="mixed", dayfirst=dayfirst, errors="coerce")
             except TypeError:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
             changed_mask = df[col].notna() & before_series.notna()
@@ -176,13 +198,21 @@ def _parse_datetimes(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict], list[d
                     "original_value": str(ov),
                     "new_value": nv,
                 })
+
+            order_label = "day-first" if dayfirst else "month-first"
+            ambiguity_note = ""
+            if not dayfirst and _has_ambiguous_dates(non_null):
+                ambiguity_note = (
+                    " WARNING: ambiguous date values detected — month-first assumed "
+                    "(e.g. 01/02 → January 2nd). Pass dayfirst=True if dates are day-first."
+                )
             log.append({
                 "operation": "parse_datetimes",
                 "column_name": col,
                 "affected_count": int(converted.notna().sum()),
                 "description": (
-                    f"'{col}': detected as datetime ({parse_ratio:.0%} values parsed); "
-                    f"converted from object to datetime64"
+                    f"'{col}': detected as datetime ({parse_ratio:.0%} values parsed, {order_label}); "
+                    f"converted from object to datetime64.{ambiguity_note}"
                 ),
             })
     return df, log, detail
@@ -219,7 +249,11 @@ def _drop_duplicates(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict], list[d
     return df, log, detail
 
 
-def clean_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict], list[dict], str]:
+def clean_dataframe(
+    df: pd.DataFrame,
+    extra_chars: str = r".,!?@#$%",
+    dayfirst: bool = False,
+) -> tuple[pd.DataFrame, list[dict], list[dict], str]:
     """Apply all cleaning steps and return (cleaned_df, summary_log, detail_log, run_timestamp).
 
     The original df is not mutated.
@@ -227,18 +261,27 @@ def clean_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict], list[di
     detail_log:  one dict per changed cell or dropped row (original_row_number, column_name,
                  action, original_value, new_value, run_timestamp).
     run_timestamp: ISO 8601 string stamped at the start of this call.
+
+    extra_chars: characters (beyond word chars and whitespace) that are *kept* during special-
+                 character removal.  Default is ``.,!?@#$%``.  Pass e.g. ``r".,!?@#$%/-()"``
+                 to also preserve slashes, hyphens and parentheses.
+    dayfirst: passed to pandas date parser.  Set True for locales where dates are written
+              DD/MM/YYYY.  When False (default) and ambiguous values are detected, a warning
+              is written into the audit log.
     """
     run_ts = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     df = df.copy()
     log: list[dict] = []
     detail_log: list[dict] = []
 
+    special_char_pattern = re.compile(rf"[^\w\s{re.escape(extra_chars)}]")
+
     for fn in [
         _standardise_column_names,
         _strip_whitespace,
         _standardise_nulls,
-        _parse_datetimes,
-        _remove_special_characters,
+        partial(_parse_datetimes, dayfirst=dayfirst),
+        partial(_remove_special_characters, pattern=special_char_pattern),
         _drop_duplicates,
     ]:
         df, entries, detail_entries = fn(df)

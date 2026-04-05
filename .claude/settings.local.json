@@ -4,7 +4,16 @@
       "Bash(\"C:\\\\Users\\\\antho\\\\PycharmProjects\\\\PythonDataProfiler\\\\main.py\":*)",
       "Bash(\"C:\\\\Users\\\\antho\\\\PycharmProjects\\\\PythonDataProfiler\\\\sample_data.csv\":*)",
       "Bash(.venv/Scripts/python.exe main.py sample_data.csv)",
-      "Bash(.venv/Scripts/pip.exe install:*)"
+      "Bash(.venv/Scripts/pip.exe install:*)",
+      "Bash(python3 -c \":*)",
+      "Bash(py -c \"import constants, profiler, interpreter, cleaner, db_connector; print\\(''All imports OK''\\)\")",
+      "Bash(\"/c/Users/antho/AppData/Local/Programs/Python/Python313/python.exe\" -c \"import constants, profiler, interpreter, cleaner, db_connector; print\\(''All imports OK''\\)\")",
+      "Bash(where python:*)",
+      "Bash(where python3:*)",
+      "Read(//c/Users/antho/AppData/Local/Programs/**)",
+      "Bash(ls \"/c/Python\"*)",
+      "Bash(\"/c/Python/python.exe\" -c \"import constants, profiler, interpreter, cleaner, db_connector; print\\(''All imports OK''\\)\")",
+      "Bash(\"/c/Users/antho/PycharmProjects/PythonDataProfiler/.venv/Scripts/python.exe\" -c \":*)"
     ]
   }
 }

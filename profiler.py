@@ -4,6 +4,15 @@ import pathlib
 # pandas is the core data manipulation library used to load and inspect the dataframe
 import pandas as pd
 
+from constants import (
+    ENCODING_CONFIDENCE_LOW,
+    HIGH_CARDINALITY_PCT,
+    NULL_WARN_PCT,
+    SKEWNESS_STRONG,
+    TOP_VALUES_COUNT,
+    TOP_VALUES_KEY,
+)
+
 # charset-normalizer sniffs raw bytes to detect file encoding and confidence score
 from charset_normalizer import from_path
 
@@ -98,12 +107,12 @@ def profile_column(series: pd.Series, total_rows: int) -> dict:
     else:
         # Categorical / boolean / string branch
         mode_vals = non_null.mode()
-        # value_counts returns frequencies sorted descending; take top 5
-        top_values = non_null.value_counts().head(5).to_dict()
+        # value_counts returns frequencies sorted descending; take the top N
+        top_values = non_null.value_counts().head(TOP_VALUES_COUNT).to_dict()
         profile.update({
             "mode": str(mode_vals.iloc[0]) if len(mode_vals) else None,
             # Cast keys/values to str/int for safe serialisation later
-            "top_5_values": {str(k): int(v) for k, v in top_values.items()},
+            TOP_VALUES_KEY: {str(k): int(v) for k, v in top_values.items()},
             # Average character length gives a sense of value width (useful for strings)
             "avg_length": round(non_null.astype(str).str.len().mean(), 2) if len(non_null) else None,
         })
@@ -149,7 +158,7 @@ def _null_color(null_pct: float) -> str:
     # >= 10%    -> red (significant data quality issue)
     if null_pct == 0:
         return "bold green"
-    elif null_pct < 10:
+    elif null_pct < NULL_WARN_PCT:
         return "yellow"
     else:
         return "bold red"
@@ -162,8 +171,8 @@ def _col_table(col: str, stats: dict) -> Table:
     # Presence of "mean" in stats distinguishes numeric columns from categorical ones
     is_numeric = "mean" in stats
 
-    # Columns with >= 10% nulls get a red header to flag them immediately
-    header_style = "bold red" if stats["null_pct"] >= 10 else "bold cyan"
+    # Columns with >= NULL_WARN_PCT nulls get a red header to flag them immediately
+    header_style = "bold red" if stats["null_pct"] >= NULL_WARN_PCT else "bold cyan"
 
     # Build the rich Table with the column name and dtype as its title
     table = Table(
@@ -181,8 +190,8 @@ def _col_table(col: str, stats: dict) -> Table:
     table.add_row("Null count", f"[{null_color}]{stats['null_count']:,}[/]")
     table.add_row("Null %", f"[{null_color}]{stats['null_pct']}%[/]")
 
-    # Unique stats — cyan when unique% >= 95, which typically indicates an ID-like column
-    unique_style = "cyan" if stats["unique_pct"] >= 95 else ""
+    # Unique stats — cyan when unique% >= HIGH_CARDINALITY_PCT, which typically indicates an ID-like column
+    unique_style = "cyan" if stats["unique_pct"] >= HIGH_CARDINALITY_PCT else ""
     table.add_row("Unique", f"[{unique_style}]{stats['unique_count']:,}[/]" if unique_style else f"{stats['unique_count']:,}")
     table.add_row("Unique %", f"[{unique_style}]{stats['unique_pct']}%[/]" if unique_style else f"{stats['unique_pct']}%")
 
@@ -192,7 +201,7 @@ def _col_table(col: str, stats: dict) -> Table:
     if is_numeric:
         # Highlight skewness in yellow when the distribution is significantly asymmetric
         skew = stats["skewness"]
-        skew_style = "yellow" if skew is not None and abs(skew) > 1 else ""
+        skew_style = "yellow" if skew is not None and abs(skew) > SKEWNESS_STRONG else ""
         skew_val = f"[{skew_style}]{skew}[/]" if skew_style else str(skew)
 
         # Full distribution stats for numeric columns
@@ -214,7 +223,7 @@ def _col_table(col: str, stats: dict) -> Table:
         # Second section separator before the frequency table
         table.add_section()
         # Each top value is indented slightly to visually distinguish it from the metric rows
-        for val, count in stats["top_5_values"].items():
+        for val, count in stats[TOP_VALUES_KEY].items():
             table.add_row(f"  {val}", f"{count:,}")
 
     return table
@@ -249,7 +258,7 @@ def print_profile(profile: dict, console: Console | None = None,
         conf = encoding_info["confidence"]
         if conf == 0.0:
             enc_line = f"\n[bold]Encoding[/bold]       [bold red]{enc}[/bold red]"
-        elif conf < 0.85:
+        elif conf < ENCODING_CONFIDENCE_LOW:
             enc_line = f"\n[bold]Encoding[/bold]       [yellow]{enc}[/yellow]  [dim](confidence: {conf:.0%})[/dim]"
         else:
             enc_line = f"\n[bold]Encoding[/bold]       {enc}  [dim](confidence: {conf:.0%})[/dim]"
