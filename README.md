@@ -49,21 +49,22 @@ PythonDataProfiler/
 ## Requirements
 
 - Python 3.10+
-- Dependencies (install via pip):
 
-```
-polars
-rich
-charset-normalizer
-```
+The application checks for its required packages at startup and installs any that are missing automatically:
+
+| Package | Purpose |
+|---|---|
+| `polars` | DataFrame engine; includes native Parquet support |
+| `rich` | Formatted output in the results panel |
+| `charset-normalizer` | CSV encoding detection |
+
+No manual `pip install` is needed for normal use. If you prefer to install them yourself:
 
 ```bash
 pip install polars rich charset-normalizer
 ```
 
-> Polars includes native Parquet support — no separate `pyarrow` install needed.
-
-> `pyodbc` is only required for SQL Server connectivity. See **Azure SQL Server Prerequisites** below.
+> `pyodbc` is only required for SQL Server connectivity and is **not** auto-installed. See **Azure SQL Server Prerequisites** below.
 
 > Tkinter is included with the standard Python distribution on Windows, macOS, and most Linux systems. No separate install is needed.
 

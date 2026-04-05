@@ -1,9 +1,10 @@
-# Standard library imports for file path handling
+# Standard library — file path resolution and existence checks
 import pathlib
 
-# Polars is the core data manipulation library
+# Polars is the core data manipulation library used throughout the project
 import polars as pl
 
+# All analysis thresholds are imported from constants so changes propagate everywhere
 from constants import (
     ENCODING_CONFIDENCE_LOW,
     HIGH_CARDINALITY_PCT,
@@ -13,10 +14,10 @@ from constants import (
     TOP_VALUES_KEY,
 )
 
-# charset-normalizer sniffs raw bytes to detect file encoding and confidence score
+# charset-normalizer sniffs raw bytes to detect file encoding and a confidence score
 from charset_normalizer import from_path
 
-# rich imports for styled terminal output
+# Rich imports for styled terminal/widget output
 from rich.console import Console   # handles printing with markup/color support
 from rich.table import Table       # renders bordered key/value tables per column
 from rich.panel import Panel       # renders the summary block in a named box
@@ -39,12 +40,15 @@ def load_file(file_path: str) -> tuple[pl.DataFrame, dict]:
     # Dispatch to the correct reader based on file extension
     suffix = path.suffix.lower()
     if suffix == ".csv":
+        # Probe the raw bytes to detect the most likely encoding and how confident the detection is
         result = from_path(path).best()
         if result is None:
+            # Detection returned nothing — default to UTF-8 but mark confidence as 0
             encoding = "utf-8"
             confidence = 0.0
         else:
             encoding = result.encoding
+            # percent_coherence is 0-100; normalise to 0-1 for consistent comparisons
             confidence = float(result.percent_coherence) / 100.0
 
         # Polars read_csv only accepts "utf8", "utf8-lossy", or "latin1" natively.
@@ -55,6 +59,8 @@ def load_file(file_path: str) -> tuple[pl.DataFrame, dict]:
             text = raw.decode(encoding)
             df = pl.read_csv(text.encode("utf-8"))
         except (UnicodeDecodeError, LookupError):
+            # Fallback: Latin-1 can decode every possible byte value without error,
+            # so this guarantees the file can always be read even if values look garbled
             raw = path.read_bytes()
             text = raw.decode("latin-1")
             df = pl.read_csv(text.encode("utf-8"))
@@ -65,6 +71,7 @@ def load_file(file_path: str) -> tuple[pl.DataFrame, dict]:
         return df, encoding_info
 
     elif suffix == ".parquet":
+        # Parquet is a binary columnar format; encoding is not applicable
         df = pl.read_parquet(path)
         return df, {"encoding": "binary (parquet)", "confidence": 1.0, "detected": False}
     else:
@@ -85,8 +92,9 @@ def _polars_skew(s: pl.Series) -> float | None:
         return 0.0
     mean = float(s.mean())
     std_f = float(std)
+    # Standardise each value, cube it, then sum — this is the raw third moment
     z_cubed_sum = float((((s - mean) / std_f) ** 3).sum())
-    # Bias-corrected (Fisher-Pearson) skewness
+    # Apply the bias-correction factor n / ((n-1) * (n-2)) to match pandas
     return (n / ((n - 1) * (n - 2))) * z_cubed_sum
 
 
@@ -137,6 +145,7 @@ def profile_column(series: pl.Series, total_rows: int) -> dict:
         # value_counts returns a DataFrame([series_name, "count"]); sort=True → descending
         vc = non_null.value_counts(sort=True).head(TOP_VALUES_COUNT)
         val_col = vc.columns[0]
+        # Build a plain dict of {value: count} for the top N values
         top_values = {
             str(v): int(c)
             for v, c in zip(vc[val_col].to_list(), vc["count"].to_list())
@@ -180,6 +189,7 @@ def profile_dataframe(df: pl.DataFrame, progress_callback=None) -> dict:
     for i, col in enumerate(df.columns):
         columns[col] = profile_column(df[col], total_rows)
         if progress_callback:
+            # Callback receives (columns_done, total_columns) so the GUI can calculate percentage
             progress_callback(i + 1, n_cols)
 
     return {"summary": summary, "columns": columns}
@@ -291,10 +301,13 @@ def print_profile(profile: dict, console: Console | None = None,
         enc = encoding_info["encoding"]
         conf = encoding_info["confidence"]
         if conf == 0.0:
+            # Confidence of 0 means detection failed entirely; bold red signals a problem
             enc_line = f"\n[bold]Encoding[/bold]       [bold red]{enc}[/bold red]"
         elif conf < ENCODING_CONFIDENCE_LOW:
+            # Yellow warns that the encoding guess may be wrong
             enc_line = f"\n[bold]Encoding[/bold]       [yellow]{enc}[/yellow]  [dim](confidence: {conf:.0%})[/dim]"
         else:
+            # Normal colour — high-confidence detection
             enc_line = f"\n[bold]Encoding[/bold]       {enc}  [dim](confidence: {conf:.0%})[/dim]"
         summary_text += enc_line
 
