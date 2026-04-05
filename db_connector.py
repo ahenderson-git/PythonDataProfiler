@@ -1,6 +1,6 @@
 import time
 
-import pandas as pd
+import polars as pl
 
 
 def _detect_driver() -> str:
@@ -137,7 +137,21 @@ def list_tables(connection_string: str) -> list:
     return _with_retry(_attempt)
 
 
-def fetch_table(connection_string: str, table_name: str) -> pd.DataFrame:
+def _cursor_to_polars(cursor) -> pl.DataFrame:
+    """Convert a pyodbc cursor result set into a Polars DataFrame.
+
+    Polars has no read_sql equivalent for pyodbc connections, so we fetch all
+    rows via the cursor and assemble the DataFrame column-by-column.
+    """
+    cols = [d[0] for d in cursor.description]
+    rows = cursor.fetchall()
+    if not rows:
+        return pl.DataFrame({col: [] for col in cols})
+    data = {col: [row[i] for row in rows] for i, col in enumerate(cols)}
+    return pl.DataFrame(data)
+
+
+def fetch_table(connection_string: str, table_name: str) -> pl.DataFrame:
     """
     Fetch all rows from a schema-qualified table or view into a DataFrame.
     table_name should be in "schema.name" format (e.g. "dbo.Orders").
@@ -162,14 +176,16 @@ def fetch_table(connection_string: str, table_name: str) -> pd.DataFrame:
             # injection through unusual but valid table names.
             parts = table_name.split(".", 1)
             quoted = ".".join(f"[{p.replace(']', ']]')}]" for p in parts)
-            return pd.read_sql(f"SELECT * FROM {quoted}", conn)
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT * FROM {quoted}")
+            return _cursor_to_polars(cursor)
         finally:
             conn.close()
 
     return _with_retry(_attempt)
 
 
-def fetch_query(connection_string: str, sql: str) -> pd.DataFrame:
+def fetch_query(connection_string: str, sql: str) -> pl.DataFrame:
     """
     Execute a custom SQL query and return the results as a DataFrame.
     Retries up to _MAX_RETRIES times on transient pyodbc errors.
@@ -179,7 +195,9 @@ def fetch_query(connection_string: str, sql: str) -> pd.DataFrame:
     def _attempt():
         conn = pyodbc.connect(connection_string, timeout=30)
         try:
-            return pd.read_sql(sql, conn)
+            cursor = conn.cursor()
+            cursor.execute(sql)
+            return _cursor_to_polars(cursor)
         finally:
             conn.close()
 

@@ -120,13 +120,13 @@ def _find_composite_keys(columns: dict, df) -> list:
 
     # Test pairs first
     for combo in combinations(candidates, 2):
-        if df.duplicated(subset=list(combo)).sum() == 0:
+        if df.select(list(combo)).is_duplicated().sum() == 0:
             qualifying.append(combo)
 
     # Only try triples if no pairs found (keeps output manageable)
     if not qualifying and len(candidates) >= 3:
         for combo in combinations(candidates, 3):
-            if df.duplicated(subset=list(combo)).sum() == 0:
+            if df.select(list(combo)).is_duplicated().sum() == 0:
                 qualifying.append(combo)
 
     return qualifying

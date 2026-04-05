@@ -921,9 +921,9 @@ class DataProfilerApp(tk.Frame):
             return
         try:
             if fmt == "csv":
-                cleaned_df.to_csv(path, index=False)
+                cleaned_df.write_csv(path)
             else:
-                cleaned_df.to_parquet(path, index=False)
+                cleaned_df.write_parquet(path)
             audit_path = self._save_audit_log(path, cleaning_log, run_ts)
             detail_path = self._save_detail_log(path, detail_log, run_ts)
             self._queue.put(("save_done", fmt, path, audit_path, detail_path))

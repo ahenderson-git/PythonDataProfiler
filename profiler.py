@@ -1,8 +1,8 @@
 # Standard library imports for file path handling
 import pathlib
 
-# pandas is the core data manipulation library used to load and inspect the dataframe
-import pandas as pd
+# Polars is the core data manipulation library
+import polars as pl
 
 from constants import (
     ENCODING_CONFIDENCE_LOW,
@@ -25,7 +25,7 @@ from rich.columns import Columns   # lays out multiple tables side-by-side
 import rich.box                    # provides box style constants (e.g. SIMPLE_HEAVY)
 
 
-def load_file(file_path: str) -> tuple[pd.DataFrame, dict]:
+def load_file(file_path: str) -> tuple[pl.DataFrame, dict]:
     """Load a CSV or Parquet file and return (df, encoding_info).
 
     encoding_info keys: encoding (str), confidence (float 0-1), detected (bool).
@@ -36,7 +36,7 @@ def load_file(file_path: str) -> tuple[pd.DataFrame, dict]:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    # Dispatch to the correct pandas reader based on file extension
+    # Dispatch to the correct reader based on file extension
     suffix = path.suffix.lower()
     if suffix == ".csv":
         result = from_path(path).best()
@@ -47,10 +47,17 @@ def load_file(file_path: str) -> tuple[pd.DataFrame, dict]:
             encoding = result.encoding
             confidence = float(result.percent_coherence) / 100.0
 
+        # Polars read_csv only accepts "utf8", "utf8-lossy", or "latin1" natively.
+        # For all other encodings we decode via Python's codec layer and re-encode to
+        # UTF-8 bytes before handing the buffer to Polars.
         try:
-            df = pd.read_csv(path, encoding=encoding)
+            raw = path.read_bytes()
+            text = raw.decode(encoding)
+            df = pl.read_csv(text.encode("utf-8"))
         except (UnicodeDecodeError, LookupError):
-            df = pd.read_csv(path, encoding="latin-1")
+            raw = path.read_bytes()
+            text = raw.decode("latin-1")
+            df = pl.read_csv(text.encode("utf-8"))
             encoding = "latin-1 (fallback)"
             confidence = 0.0
 
@@ -58,19 +65,38 @@ def load_file(file_path: str) -> tuple[pd.DataFrame, dict]:
         return df, encoding_info
 
     elif suffix == ".parquet":
-        df = pd.read_parquet(path)
+        df = pl.read_parquet(path)
         return df, {"encoding": "binary (parquet)", "confidence": 1.0, "detected": False}
     else:
         raise ValueError(f"Unsupported file type '{suffix}'. Expected .csv or .parquet")
 
 
-def profile_column(series: pd.Series, total_rows: int) -> dict:
+def _polars_skew(s: pl.Series) -> float | None:
+    """Compute the adjusted Fisher-Pearson skewness coefficient.
+
+    Matches pandas Series.skew() — uses bias correction factor sqrt(n*(n-1))/(n-2).
+    Returns None when fewer than 3 values are present or std is zero.
+    """
+    n = len(s)
+    if n < 3:
+        return None
+    std = s.std(ddof=1)
+    if std is None or float(std) == 0.0:
+        return 0.0
+    mean = float(s.mean())
+    std_f = float(std)
+    z_cubed_sum = float((((s - mean) / std_f) ** 3).sum())
+    # Bias-corrected (Fisher-Pearson) skewness
+    return (n / ((n - 1) * (n - 2))) * z_cubed_sum
+
+
+def profile_column(series: pl.Series, total_rows: int) -> dict:
     # Count missing values and express as a percentage of total rows
-    null_count = series.isna().sum()
+    null_count = series.null_count()
     null_pct = null_count / total_rows * 100
 
-    # Count distinct non-null values (dropna=True excludes NaN from the unique count)
-    unique_count = series.nunique(dropna=True)
+    # Count distinct non-null values (Polars n_unique excludes nulls by default)
+    unique_count = series.n_unique()
 
     # Base stats present for every column regardless of type
     profile = {
@@ -82,24 +108,25 @@ def profile_column(series: pd.Series, total_rows: int) -> dict:
     }
 
     # Work only on non-null values for all further calculations
-    non_null = series.dropna()
+    non_null = series.drop_nulls()
 
-    # Numeric branch: booleans are technically numeric in pandas but are excluded
-    # here so they fall through to the categorical branch instead
-    if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
-        mode_vals = non_null.mode()  # mode() can return multiple values; we take the first
+    # Numeric branch: Boolean is technically numeric in Polars but is excluded
+    # here so it falls through to the categorical branch instead
+    if series.dtype.is_numeric() and series.dtype != pl.Boolean:
+        mode_vals = non_null.mode()
         profile.update({
             "min": round(float(non_null.min()), 4) if len(non_null) else None,
             "max": round(float(non_null.max()), 4) if len(non_null) else None,
             "mean": round(float(non_null.mean()), 4) if len(non_null) else None,
             "median": round(float(non_null.median()), 4) if len(non_null) else None,
-            "mode": round(float(mode_vals.iloc[0]), 4) if len(mode_vals) else None,
+            "mode": round(float(mode_vals[0]), 4) if len(mode_vals) else None,
             # std requires at least 2 values (ddof=1 by default)
-            "std": round(float(non_null.std()), 4) if len(non_null) > 1 else None,
-            "q1": round(float(non_null.quantile(0.25)), 4) if len(non_null) else None,
-            "q3": round(float(non_null.quantile(0.75)), 4) if len(non_null) else None,
-            # skew requires at least 3 values to be meaningful
-            "skewness": round(float(non_null.skew()), 4) if len(non_null) > 2 else None,
+            "std": round(float(non_null.std(ddof=1)), 4) if len(non_null) > 1 else None,
+            # Polars quantile requires an explicit interpolation strategy
+            "q1": round(float(non_null.quantile(0.25, interpolation="nearest")), 4) if len(non_null) else None,
+            "q3": round(float(non_null.quantile(0.75, interpolation="nearest")), 4) if len(non_null) else None,
+            # skew requires at least 3 values; Polars has no built-in so we compute manually
+            "skewness": round(_polars_skew(non_null), 4) if len(non_null) > 2 else None,
             # counts of special values useful for data quality checks
             "zeros": int((non_null == 0).sum()),
             "negatives": int((non_null < 0).sum()),
@@ -107,25 +134,32 @@ def profile_column(series: pd.Series, total_rows: int) -> dict:
     else:
         # Categorical / boolean / string branch
         mode_vals = non_null.mode()
-        # value_counts returns frequencies sorted descending; take the top N
-        top_values = non_null.value_counts().head(TOP_VALUES_COUNT).to_dict()
+        # value_counts returns a DataFrame([series_name, "count"]); sort=True → descending
+        vc = non_null.value_counts(sort=True).head(TOP_VALUES_COUNT)
+        val_col = vc.columns[0]
+        top_values = {
+            str(v): int(c)
+            for v, c in zip(vc[val_col].to_list(), vc["count"].to_list())
+        }
         profile.update({
-            "mode": str(mode_vals.iloc[0]) if len(mode_vals) else None,
+            "mode": str(mode_vals[0]) if len(mode_vals) else None,
             # Cast keys/values to str/int for safe serialisation later
-            TOP_VALUES_KEY: {str(k): int(v) for k, v in top_values.items()},
+            TOP_VALUES_KEY: top_values,
             # Average character length gives a sense of value width (useful for strings)
-            "avg_length": round(non_null.astype(str).str.len().mean(), 2) if len(non_null) else None,
+            "avg_length": round(
+                float(non_null.cast(pl.Utf8).str.len_chars().mean()), 2
+            ) if len(non_null) else None,
         })
 
     return profile
 
 
-def profile_dataframe(df: pd.DataFrame, progress_callback=None) -> dict:
+def profile_dataframe(df: pl.DataFrame, progress_callback=None) -> dict:
     total_rows = len(df)
     total_cells = total_rows * len(df.columns)  # used to compute overall null percentage
 
-    # sum().sum() flattens the per-column null counts into a single integer
-    total_nulls = int(df.isna().sum().sum())
+    # null_count() returns a single-row DataFrame; sum the row to get the grand total
+    total_nulls = sum(df.null_count().row(0))
 
     summary = {
         "rows": total_rows,
@@ -134,10 +168,10 @@ def profile_dataframe(df: pd.DataFrame, progress_callback=None) -> dict:
         "total_nulls": total_nulls,
         # Guard against empty dataframe (total_cells == 0) to avoid division by zero
         "total_null_pct": round(total_nulls / total_cells * 100, 2) if total_cells else 0,
-        # duplicated() marks every duplicate occurrence (not just the first); sum counts them
-        "duplicate_rows": int(df.duplicated().sum()),
-        # deep=True includes object column memory (e.g. string values), not just the index
-        "memory_mb": round(df.memory_usage(deep=True).sum() / 1024 ** 2, 3),
+        # is_duplicated() marks every row that appears more than once; sum counts them
+        "duplicate_rows": int(df.is_duplicated().sum()),
+        # estimated_size returns bytes; Polars uses Arrow layout so this is approximate
+        "memory_mb": round(df.estimated_size() / 1024 ** 2, 3),
     }
 
     # Profile each column independently; fire optional callback after each for progress reporting
