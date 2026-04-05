@@ -151,7 +151,7 @@ class SqlPanel(tk.Frame):
         self._ent_password = tk.Entry(self, textvariable=self._password_var, show="*", width=30)
         self._ent_password.grid(row=4, column=1, columnspan=2, sticky="ew")
 
-        self._btn_connect = tk.Button(self, text="Connect", command=self._connect, width=10)
+        self._btn_connect = ttk.Button(self, text="Connect", command=self._connect, width=10)
         self._btn_connect.grid(row=5, column=0, sticky="w", pady=(8, 2))
 
         self._table_combo = ttk.Combobox(
@@ -236,6 +236,10 @@ class DataProfilerApp(tk.Frame):
         super().__init__(master, padx=12, pady=12)
         self.pack(fill=tk.BOTH, expand=True)
 
+        # Apply modern visual theme
+        _style = ttk.Style()
+        _style.theme_use("clam")
+
         # Shared state
         self._profile = None
         self._findings = None
@@ -257,9 +261,10 @@ class DataProfilerApp(tk.Frame):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        tk.Label(self, text="Python Data Profiler", font=("", 14, "bold")).pack(
-            anchor="w", pady=(0, 6)
-        )
+        hdr = tk.Frame(self, bg="#2b5797")
+        hdr.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(hdr, text="Python Data Profiler", font=("", 15, "bold"),
+                 fg="white", bg="#2b5797", pady=8).pack()
 
         # Source toggle row
         source_row = tk.Frame(self)
@@ -283,7 +288,7 @@ class DataProfilerApp(tk.Frame):
         tk.Entry(
             self._file_frame, textvariable=self._file_var, state="readonly", width=60
         ).pack(side=tk.LEFT, padx=(6, 6))
-        self._btn_browse = tk.Button(self._file_frame, text="Browse", command=self._browse)
+        self._btn_browse = ttk.Button(self._file_frame, text="Browse", command=self._browse)
         self._btn_browse.pack(side=tk.LEFT)
 
         # --- SQL panel (hidden initially) ---
@@ -291,36 +296,43 @@ class DataProfilerApp(tk.Frame):
             self, self._queue, on_connect_start=self._on_sql_connect_started
         )
 
-        # Action buttons row
-        btn_row = tk.Frame(self)
-        btn_row.pack(anchor="w", pady=(0, 6))
+        # Separator between input and action sections
+        self._input_sep = ttk.Separator(self, orient="horizontal")
+        self._input_sep.pack(fill=tk.X, pady=(4, 6))
 
-        self._btn_analyse = tk.Button(btn_row, text="Analyse", command=self._analyse, width=12)
-        self._btn_analyse.pack(side=tk.LEFT, padx=(0, 8))
+        # Analyse button row
+        analyse_row = tk.Frame(self)
+        analyse_row.pack(anchor="w", pady=(0, 4))
+        self._btn_analyse = ttk.Button(analyse_row, text="Analyse", command=self._analyse, width=12)
+        self._btn_analyse.pack(side=tk.LEFT)
 
-        self._btn_json = tk.Button(
-            btn_row, text="Export JSON", command=self._export_json,
+        # Export Analysis section
+        export_analysis_frame = ttk.LabelFrame(self, text="Export Analysis", padding=(6, 4))
+        export_analysis_frame.pack(fill=tk.X, pady=(4, 2))
+        self._btn_json = ttk.Button(
+            export_analysis_frame, text="Export JSON", command=self._export_json,
             state=tk.DISABLED, width=12,
         )
         self._btn_json.pack(side=tk.LEFT, padx=(0, 4))
-
-        self._btn_csv = tk.Button(
-            btn_row, text="Export CSV", command=self._export_csv,
+        self._btn_csv = ttk.Button(
+            export_analysis_frame, text="Export CSV", command=self._export_csv,
             state=tk.DISABLED, width=12,
         )
         self._btn_csv.pack(side=tk.LEFT)
 
-        self._btn_clean_csv = tk.Button(
-            btn_row, text="Export Clean CSV", command=self._export_clean_csv,
+        # Export Clean Data section
+        export_clean_frame = ttk.LabelFrame(self, text="Export Clean Data", padding=(6, 4))
+        export_clean_frame.pack(fill=tk.X, pady=(2, 4))
+        self._btn_clean_csv = ttk.Button(
+            export_clean_frame, text="Export Clean CSV", command=self._export_clean_csv,
             state=tk.DISABLED, width=16,
         )
-        self._btn_clean_csv.pack(side=tk.LEFT, padx=(8, 0))
-
-        self._btn_clean_parquet = tk.Button(
-            btn_row, text="Export Clean Parquet", command=self._export_clean_parquet,
-            state=tk.DISABLED, width=18,
+        self._btn_clean_csv.pack(side=tk.LEFT, padx=(0, 4))
+        self._btn_clean_parquet = ttk.Button(
+            export_clean_frame, text="Export Clean Parquet", command=self._export_clean_parquet,
+            state=tk.DISABLED, width=20,
         )
-        self._btn_clean_parquet.pack(side=tk.LEFT, padx=(4, 0))
+        self._btn_clean_parquet.pack(side=tk.LEFT)
 
         # Progress frame (hidden until analysis/connect starts)
         self._progress_frame = tk.Frame(self)
@@ -330,12 +342,15 @@ class DataProfilerApp(tk.Frame):
         self._progress_bar.pack(side=tk.LEFT, padx=(0, 8))
         self._status_label = tk.Label(self._progress_frame, text="", anchor="w")
         self._status_label.pack(side=tk.LEFT, expand=True, fill=tk.X)
-        self._btn_cancel = tk.Button(
+        self._btn_cancel = ttk.Button(
             self._progress_frame, text="Cancel", command=self._cancel_operation, width=8
         )
         self._btn_cancel.pack(side=tk.RIGHT, padx=(8, 0))
         self._timer_label = tk.Label(self._progress_frame, text="", width=8, anchor="e")
         self._timer_label.pack(side=tk.RIGHT)
+
+        # Separator between action sections and results
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, pady=(2, 4))
 
         # Results area
         text_frame = tk.Frame(self)
@@ -362,12 +377,12 @@ class DataProfilerApp(tk.Frame):
         if self._source_var.get() == "file":
             self._sql_panel.pack_forget()
             self._file_frame.pack(
-                fill=tk.X, pady=(0, 6), before=self._btn_analyse.master
+                fill=tk.X, pady=(0, 6), before=self._input_sep
             )
         else:
             self._file_frame.pack_forget()
             self._sql_panel.pack(
-                fill=tk.X, pady=(0, 6), before=self._btn_analyse.master
+                fill=tk.X, pady=(0, 6), before=self._input_sep
             )
 
     # ------------------------------------------------------------------
