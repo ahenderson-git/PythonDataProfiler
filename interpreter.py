@@ -74,6 +74,20 @@ def _table_findings(summary: dict, columns: dict, df) -> list:
     else:
         findings.append("No null values across the entire dataset")
 
+    # --- Encoding quality ---
+    enc_confidence = summary.get("encoding_confidence", 1.0)
+    encoding = summary.get("encoding", "")
+    if "fallback" in encoding:
+        findings.append(
+            f"Encoding detection failed — file was read as Latin-1 (fallback). "
+            f"Values may be garbled. Re-save the file as UTF-8 and reload."
+        )
+    elif enc_confidence < 0.85 and enc_confidence > 0.0:
+        findings.append(
+            f"Encoding detected as '{encoding}' with low confidence ({enc_confidence:.0%}). "
+            f"If values appear garbled, re-save the file as UTF-8 and reload."
+        )
+
     return findings
 
 

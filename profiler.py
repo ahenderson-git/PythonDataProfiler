@@ -4,6 +4,9 @@ import pathlib
 # pandas is the core data manipulation library used to load and inspect the dataframe
 import pandas as pd
 
+# charset-normalizer sniffs raw bytes to detect file encoding and confidence score
+from charset_normalizer import from_path
+
 # rich imports for styled terminal output
 from rich.console import Console   # handles printing with markup/color support
 from rich.table import Table       # renders bordered key/value tables per column
@@ -13,7 +16,12 @@ from rich.columns import Columns   # lays out multiple tables side-by-side
 import rich.box                    # provides box style constants (e.g. SIMPLE_HEAVY)
 
 
-def load_file(file_path: str) -> pd.DataFrame:
+def load_file(file_path: str) -> tuple[pd.DataFrame, dict]:
+    """Load a CSV or Parquet file and return (df, encoding_info).
+
+    encoding_info keys: encoding (str), confidence (float 0-1), detected (bool).
+    For Parquet, encoding is 'binary (parquet)' and detected is False.
+    """
     # Resolve the path and verify the file exists before attempting to read
     path = pathlib.Path(file_path)
     if not path.exists():
@@ -22,9 +30,27 @@ def load_file(file_path: str) -> pd.DataFrame:
     # Dispatch to the correct pandas reader based on file extension
     suffix = path.suffix.lower()
     if suffix == ".csv":
-        return pd.read_csv(path)
+        result = from_path(path).best()
+        if result is None:
+            encoding = "utf-8"
+            confidence = 0.0
+        else:
+            encoding = result.encoding
+            confidence = float(result.percent_coherence) / 100.0
+
+        try:
+            df = pd.read_csv(path, encoding=encoding)
+        except (UnicodeDecodeError, LookupError):
+            df = pd.read_csv(path, encoding="latin-1")
+            encoding = "latin-1 (fallback)"
+            confidence = 0.0
+
+        encoding_info = {"encoding": encoding, "confidence": confidence, "detected": True}
+        return df, encoding_info
+
     elif suffix == ".parquet":
-        return pd.read_parquet(path)
+        df = pd.read_parquet(path)
+        return df, {"encoding": "binary (parquet)", "confidence": 1.0, "detected": False}
     else:
         raise ValueError(f"Unsupported file type '{suffix}'. Expected .csv or .parquet")
 
@@ -194,7 +220,8 @@ def _col_table(col: str, stats: dict) -> Table:
     return table
 
 
-def print_profile(profile: dict, console: Console | None = None) -> None:
+def print_profile(profile: dict, console: Console | None = None,
+                  encoding_info: dict | None = None) -> None:
     # force_terminal=True: treat stream as a terminal even when not a real TTY
     # color_system="truecolor": force ANSI colour output (auto-detection returns None
     # for non-TTY streams, suppressing all colour even with force_terminal=True)
@@ -215,6 +242,19 @@ def print_profile(profile: dict, console: Console | None = None) -> None:
         f"[bold]Duplicates[/bold]     [{dup_color}]{s['duplicate_rows']:,}[/]\n"
         f"[bold]Memory[/bold]         {s['memory_mb']} MB"
     )
+
+    # Append encoding line when info is available (CSV files only)
+    if encoding_info and encoding_info.get("detected"):
+        enc = encoding_info["encoding"]
+        conf = encoding_info["confidence"]
+        if conf == 0.0:
+            enc_line = f"\n[bold]Encoding[/bold]       [bold red]{enc}[/bold red]"
+        elif conf < 0.85:
+            enc_line = f"\n[bold]Encoding[/bold]       [yellow]{enc}[/yellow]  [dim](confidence: {conf:.0%})[/dim]"
+        else:
+            enc_line = f"\n[bold]Encoding[/bold]       {enc}  [dim](confidence: {conf:.0%})[/dim]"
+        summary_text += enc_line
+
     # Panel wraps the summary text in a named bordered box
     console.print(Panel(summary_text, title="[bold white]Dataset Summary[/bold white]", expand=False))
 

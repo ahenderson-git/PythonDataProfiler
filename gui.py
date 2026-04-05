@@ -319,9 +319,10 @@ class DataProfilerApp(tk.Frame):
                     self._queue.put(("progress", 2, f"Fetching {table_name}..."))
                     df = db_connector.fetch_table(source_arg, table_name)
                     source_label = table_name
+                encoding_info = {"encoding": "SQL (driver)", "confidence": 1.0, "detected": False}
             else:
                 self._queue.put(("progress", 2, "Loading file..."))
-                df = load_file(source_arg)
+                df, encoding_info = load_file(source_arg)
                 source_label = os.path.basename(source_arg)
 
             t1 = time.perf_counter()
@@ -334,6 +335,9 @@ class DataProfilerApp(tk.Frame):
             profile = profile_dataframe(df, progress_callback=col_cb)
             t2 = time.perf_counter()
 
+            profile["summary"]["encoding"] = encoding_info["encoding"]
+            profile["summary"]["encoding_confidence"] = encoding_info["confidence"]
+
             self._queue.put(("progress", 82, "Interpreting findings..."))
             findings = interpret_profile(profile, df)
             t3 = time.perf_counter()
@@ -342,7 +346,7 @@ class DataProfilerApp(tk.Frame):
             findings_text = format_findings(findings, file_name=source_label)
             buf = io.StringIO()
             console = Console(file=buf, highlight=False, width=char_width)
-            print_profile(profile, console=console)
+            print_profile(profile, console=console, encoding_info=encoding_info)
             t4 = time.perf_counter()
 
             timings = {
